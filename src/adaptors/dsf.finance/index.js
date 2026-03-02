@@ -14,12 +14,15 @@ const SCALE = 10n ** 18n;
 // coins.llama.fi: timestamp -> closest block
 async function getBlockAtTs(chain, ts) {
   const url = `https://coins.llama.fi/block/${chain}/${ts}`;
-  const res = await utils.getData(url);
-
-  const height = res?.height ?? res?.block;
-  if (height == null) throw new Error(`No block for ts=${ts}`);
-
-  return height;
+  for (let i = 0; i < 4; i++) {
+    try {
+      const res = await utils.getData(url);
+      const height = res?.height ?? res?.block;
+      if (height != null) return height;
+    } catch (e) {}
+    await new Promise(r => setTimeout(r, 250 * (i + 1)));
+  }
+  return null; // apy=0
 }
 
 async function getLpPriceAtBlock(contractAddress, block) {
@@ -58,7 +61,7 @@ async function getTVL(contractAddress, block) {
     target: contractAddress,
     abi: abi.totalHoldings,
     chain: CHAIN,
-    block,
+    ...(block ? { block } : {}), 
   });
   return BigInt(tvlResponse.output);
 }
@@ -115,24 +118,19 @@ const collectPools = async (timestamp = Math.floor(Date.now()/1000)) => {
     getBlockAtTs(CHAIN, prevTs),
   ]);
 
-  const tvl = await getTVL(dsfPoolStables, blockNow);
+  const tvl = await getTVL(dsfPoolStables, blockNow ?? undefined);
 
   // IMPORTANT: use fallback by blocks
   const [lpNow, lpPrev] = await Promise.all([
-    getLpPriceAtBlockWithFallback(dsfPoolStables, blockNow),
-    getLpPriceAtBlockWithFallback(dsfPoolStables, blockPrev),
+    blockNow ? getLpPriceAtBlockWithFallback(dsfPoolStables, blockNow) : null,
+    blockPrev ? getLpPriceAtBlockWithFallback(dsfPoolStables, blockPrev) : null,
   ]);
   
   let apy = 0;
-  let growthScaled = null;
-  
   if (lpNow && lpPrev && lpPrev > 0n) {
     const dtSeconds = DAYS * 24 * 60 * 60;
-
-    growthScaled = (lpNow * SCALE) / lpPrev;
-
-    apy = annualizeFromRatio1e18(growthScaled, dtSeconds);
-    apy = clampApy(apy);
+    const growthScaled = (lpNow * SCALE) / lpPrev;
+    apy = clampApy(annualizeFromRatio1e18(growthScaled, dtSeconds));
   }
 
   return [
